@@ -1,0 +1,356 @@
+#!/eprints/perl/bin/perl
+###############################################################################
+#
+# Create a sitemap for an archive according to the Sitemap protocol. See
+# http://www.sitemaps.org for a description of the protocol.
+#
+###############################################################################
+#
+#  Copyright (c) 2011 Queensland University of Technology, Queensland,
+#  Australia
+#  
+#  This script is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  The script is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with EPrints 3; if not, write to the Free Software
+#  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
+#  USA
+#
+######################################################################
+
+=pod
+
+=head1 NAME
+
+B<create_sitemap> - Create a sitemap
+
+=head1 SYNOPSIS
+
+B<create_sitemap> I<repository_id> [B<options>]
+
+=head1 DESCRIPTION
+
+This command creates a sitemap for an EPrints repository according the
+Sitemap protocol defined at B<http://www.sitemaps.org>.
+
+=head1 ARGUMENTS
+
+=over 8
+
+=item I<repository_id> 
+
+The ID of the EPrints repository for which to generate the sitemap.
+
+=back
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--help>
+
+Print a brief help message and exit.
+
+=item B<--man>
+
+Print the full manual page and then exit.
+
+=item B<--quiet>
+
+Be vewwy vewwy quiet. This option will supress all output unless an error occurs.
+
+=item B<--verbose>
+
+Explain in detail what is going on. May be repeated for greater effect.
+
+=back
+
+=cut
+
+use strict;
+use warnings;
+
+use lib '/opt/eprints3/perl_lib';
+
+use Compress::Zlib;
+use Getopt::Long;
+use Pod::Usage;
+
+use EPrints;
+
+
+#
+# Set default parameters
+#
+my $verbose = 0;
+my $quiet = 0;
+my $help = 0;
+my $man = 0;
+
+#
+# Parse the command line options
+#
+Getopt::Long::Configure("permute");
+GetOptions(
+	'help|?' => \$help,
+	'man' => \$man,
+	'verbose+' => \$verbose,
+	'quiet' => \$quiet,
+) || pod2usage( 2 );
+
+
+#
+# Print out help screens, if desired
+#
+pod2usage( 1 ) if $help;
+pod2usage( -exitstatus => 0, -verbose => 2 ) if $man;
+pod2usage( 2 ) if( scalar @ARGV != 1 );
+
+
+#
+# Configure verbosity
+#
+my $noise = 1;
+$noise = 0 if( $quiet );
+$noise = 1+$verbose if( $verbose );
+
+
+#
+# Get a handle to the repository
+#
+my $repoid = shift @ARGV || 'quteprints';
+my $eprints = EPrints->new;
+my $repository = $eprints->repository( $repoid, noise => $noise );
+if( !defined $repository )
+{
+	print STDERR "Failed to load repository: $repoid\n";
+	exit 1;
+}
+
+
+#
+# Construct output filenames and URLs
+#
+my %basename;
+$basename{index} = 'sitemap.xml';
+$basename{abstracts} = 'sitemap-abstracts.xml.gz';
+
+my $static_path = $repository->get_conf( 'config_path' ) . '/static';
+
+my %file;
+$file{index}     = $static_path . "/$basename{index}";
+$file{abstracts} = $static_path . "/$basename{abstracts}";
+
+my %url;
+my $host = $repository->get_conf( 'host' );
+my $port = $repository->get_conf( 'port' );
+my $baseurl = "http://$host" . ( $port != 80 ? ":$port" : '' );
+$url{index} = "$baseurl/$basename{index}";
+$url{abstracts} = "$baseurl/$basename{abstracts}";
+
+
+#
+# Write abstracts sitemap
+#
+my $gzabstracts = gzopen( $file{abstracts}, "wb" );
+if ( defined $gzabstracts )
+{
+	# write XML header
+	$gzabstracts->gzwrite( xml_header() );
+
+	# start <urlset> element
+	$gzabstracts->gzwrite( sitemap_urlset_start() . "\n" );
+
+	# write out a <url> element for each abstract
+	my $dataset = $repository->get_dataset( 'archive' );
+	my $info = {
+		gz => $gzabstracts,
+	};
+	$dataset->map( $repository, \&output_abstract_url, $info );
+
+	# close the <urlset> element
+	$gzabstracts->gzwrite( sitemap_urlset_end() );
+
+	# close the file
+	$gzabstracts->gzclose;
+}
+else
+{
+	print STDERR "Could not open " . $file{abstracts} . ": $!\n";
+}
+
+
+#
+# Write index file
+#
+if ( open( my $fhindex, ">:encoding(UTF-8)", $file{index} ) )
+{
+	# write XML header
+	print { $fhindex } xml_header() . "\n";
+
+	# start <sitemapindex> element
+	print { $fhindex } sitemap_index_start();
+
+	# add a <sitemap> element for the abstracts
+	print { $fhindex } sitemap_sitemap(
+		loc => $url{abstracts},
+		lastmod => sprintf( "%04d-%02d-%02d", EPrints::Time::get_date_array( time ) )
+	);
+
+	# close the <sitemapindex> element
+	print { $fhindex } sitemap_index_end();
+
+	# close the file
+	close( $fhindex );
+}
+else
+{
+	print STDERR "Could not open " . $file{index} . ": $!\n";
+}
+
+#
+# Clean up
+#
+$repository->terminate;
+
+exit (0);
+
+
+#### END OF MAIN FUNCTION ####
+
+# output a <url> element for an abstract page to the 'gz' (compressed file) or 'fh' (uncompressed file) member of $info
+sub output_abstract_url
+{
+	my ( $rep, $dataset, $eprint, $info ) = @_;
+
+
+	my $xml = sitemap_url(
+		loc => $eprint->get_url,
+		lastmod => $eprint->is_set( 'lastmod' ) ? substr( $eprint->get_value( 'lastmod' ), 0, 10 ) : undef,
+		changefreq => 'yearly',
+		priority => 1.0,
+	);
+
+	if ( defined $info->{gz} )
+	{
+		$info->{gz}->gzwrite( $xml );
+	}
+	elsif ( defined $info->{fh} )
+	{
+		print { $info->{fh} } $xml;
+	}
+	return;
+}
+
+#### Sitemap protocol helper functions ####
+
+# return the header of an XML file
+sub xml_header
+{
+	return '<?xml version="1.0" encoding="UTF-8"?>';
+}
+
+# return the start tag for the <urlset> element
+sub sitemap_urlset_start
+{
+	return '<urlset' .
+		' xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"' .
+		' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' .
+		' xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd"' .
+	'>';
+}
+
+# return the end tag for the <urlset> element
+sub sitemap_urlset_end
+{
+	return '</urlset>';
+}
+
+# return a <url> element
+sub sitemap_url
+{
+	my ( %elements ) = @_;
+
+	# start the <url> element
+	my $xml = '<url>';
+
+	# <loc> element
+	if ( defined $elements{loc} )
+	{
+		$xml .= '<loc>' . $elements{loc} . '</loc>';
+	}
+
+	# <lastmod> element
+	if ( defined $elements{lastmod} )
+	{
+		$xml .= '<lastmod>' . $elements{lastmod} . '</lastmod>';
+	}
+
+	# <changefreq> element
+	if ( defined $elements{changefreq} )
+	{
+		$xml .= '<changefreq>' . $elements{changefreq} . '</changefreq>';
+	}
+
+	# <priority> element
+	if ( defined $elements{priority} )
+	{
+		$xml .= '<priority>' . $elements{priority} . '</priority>';
+	}
+
+	# close the <url> element
+	$xml .= '</url>';
+
+	return $xml;
+}
+	
+
+# return the start tag for the <sitemapindex> element
+sub sitemap_index_start
+{
+	return '<sitemapindex' .
+		' xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"' .
+		' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' .
+		' xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/siteindex.xsd"' .
+	'>';
+}
+
+# return the end tag for the <sitemapindex> element
+sub sitemap_index_end
+{
+	return '</sitemapindex>';
+}
+
+# return a <sitemap> element
+sub sitemap_sitemap
+{
+	my ( %elements ) = @_;
+
+	# start the <sitemap> element
+	my $xml = '<sitemap>';
+
+	# <loc> element
+	if ( defined $elements{loc} )
+	{
+		$xml .= '<loc>' . $elements{loc} . '</loc>';
+	}
+
+	# <lastmod> element
+	if ( defined $elements{lastmod} )
+	{
+		$xml .= '<lastmod>' . $elements{lastmod} . '</lastmod>';
+	}
+
+	# close the <sitemap> element
+	$xml .= '</sitemap>';
+
+	return $xml;
+}
