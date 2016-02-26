@@ -63,6 +63,10 @@ Print a brief help message and exit.
 
 Print the full manual page and then exit.
 
+=item B<--nocompress>
+
+Don't GZip compress the resulting file. For debuggery purposes.
+
 =item B<--quiet>
 
 Be vewwy vewwy quiet. This option will supress all output unless an error occurs.
@@ -90,6 +94,7 @@ use EPrints;
 #
 # Set default parameters
 #
+my $nocompress = 0;
 my $verbose = 0;
 my $quiet = 0;
 my $help = 0;
@@ -102,6 +107,7 @@ Getopt::Long::Configure("permute");
 GetOptions(
 	'help|?' => \$help,
 	'man' => \$man,
+	'nocompress' => \$nocompress,
 	'verbose+' => \$verbose,
 	'quiet' => \$quiet,
 ) || pod2usage( 2 );
@@ -139,71 +145,122 @@ if( !defined $repository )
 #
 # Construct output filenames and URLs
 #
-my %basename;
-$basename{index} = 'sitemap.xml';
-$basename{abstracts} = 'sitemap-abstracts.xml.gz';
+my $index_fn = 'sitemap.xml';
 
 my $static_path = $repository->get_conf( 'config_path' ) . '/static';
 
-my %file;
-$file{index}     = $static_path . "/$basename{index}";
-$file{abstracts} = $static_path . "/$basename{abstracts}";
-
-my %url;
 my $host = $repository->get_conf( 'host' );
 my $port = $repository->get_conf( 'port' );
 my $baseurl = "http://$host" . ( $port != 80 ? ":$port" : '' );
-$url{index} = "$baseurl/$basename{index}";
-$url{abstracts} = "$baseurl/$basename{abstracts}";
 
+# created once, in anticipation of future uses
+my $datestamp = sprintf( "%04d-%02d-%02d", EPrints::Time::get_date_array( time ) );
 
 #
-# Write abstracts sitemap
+# function pointers (vanilla or gzip versions)
 #
-my $gzabstracts = gzopen( $file{abstracts}, "wb" );
-if ( defined $gzabstracts )
+my $open;
+my $write;
+my $close;
+if( $nocompress )
 {
-	# write XML header
-	$gzabstracts->gzwrite( xml_header() );
-
-	# start <urlset> element
-	$gzabstracts->gzwrite( sitemap_urlset_start() . "\n" );
-
-	# write out a <url> element for each abstract
-	my $dataset = $repository->get_dataset( 'archive' );
-	my $info = {
-		gz => $gzabstracts,
+	$open  = sub($) {
+		my( $fn ) = @_;
+		open my $fh, '>:encoding(UTF-8)', $fn;
+		return $fh;
 	};
-	$dataset->map( $repository, \&output_abstract_url, $info );
-
-	# close the <urlset> element
-	$gzabstracts->gzwrite( sitemap_urlset_end() );
-
-	# close the file
-	$gzabstracts->gzclose;
+	$write = sub($$) {
+		my( $fh, $str ) = @_;
+		print { $fh } $str;
+	};
+	$close = sub($) {
+		my( $fh ) = @_;
+		close $fh;
+	};
 }
 else
 {
-	print STDERR "Could not open " . $file{abstracts} . ": $!\n";
+	$open  = sub($) {
+		my( $fn ) = @_;
+		return gzopen( $fn, 'wb' );
+	};
+	$write = \&Compress::Zlib::gzFile::gzwrite;
+	$close = \&Compress::Zlib::gzFile::gzclose;
+}
+
+
+
+#
+# Write abstracts sitemaps
+#
+
+# write out a <url> element for each abstract
+my @filenames = ();
+my $dataset = $repository->get_dataset( 'archive' );
+
+# this is bastardised from EPrints::List::map
+my $CHUNK_SIZE = 50000;
+my $list = $dataset->prepare_search->perform_search;
+for( my $offset = 0; $offset < $list->count; $offset += $CHUNK_SIZE )
+{
+	my $abstracts_fn = next_abstractxml_filename( gz=>!$nocompress );
+	my $abstracts_fh = &{$open}( "$static_path/$abstracts_fn" );
+	if( defined $abstracts_fh )
+	{
+		print STDOUT "Writing to $static_path/$abstracts_fn\n" if $noise;
+
+		# write XML header
+		&{$write}( $abstracts_fh, xml_header() );
+
+		# start <urlset> element
+		&{$write}( $abstracts_fh, sitemap_urlset_start() . "\n" );
+
+		my $info = {
+			'fh' => $abstracts_fh
+		};
+
+		my @records = $list->slice( $offset, $CHUNK_SIZE );
+		foreach my $item ( @records )
+		{
+			output_abstract_url( $repository, $dataset, $item, $info );
+		}
+
+		# close the <urlset> element
+		&{$write}( $abstracts_fh, sitemap_urlset_end() );
+
+		# close the file
+		&{$close}( $abstracts_fh );
+
+		# record the filename
+		push @filenames, $abstracts_fn;
+	}
+	else
+	{
+		print STDERR "Could not open $static_path/$abstracts_fn: $!\n";
+	}
 }
 
 
 #
-# Write index file
+# Write index file (this one is never compressed)
 #
-if ( open( my $fhindex, ">:encoding(UTF-8)", $file{index} ) )
+my $full_index_fn = "$static_path/$index_fn";
+if ( open( my $fhindex, ">:encoding(UTF-8)", $full_index_fn ) )
 {
 	# write XML header
-	print { $fhindex } xml_header() . "\n";
+	print { $fhindex } xml_header();
 
 	# start <sitemapindex> element
 	print { $fhindex } sitemap_index_start();
 
 	# add a <sitemap> element for the abstracts
-	print { $fhindex } sitemap_sitemap(
-		loc => $url{abstracts},
-		lastmod => sprintf( "%04d-%02d-%02d", EPrints::Time::get_date_array( time ) )
-	);
+	foreach my $fn ( @filenames )
+	{
+		print { $fhindex } sitemap_sitemap(
+			loc => "$baseurl/$fn",
+			lastmod => $datestamp,
+		);
+	}
 
 	# close the <sitemapindex> element
 	print { $fhindex } sitemap_index_end();
@@ -213,7 +270,7 @@ if ( open( my $fhindex, ">:encoding(UTF-8)", $file{index} ) )
 }
 else
 {
-	print STDERR "Could not open " . $file{index} . ": $!\n";
+	print STDERR "Could not open " . $full_index_fn . ": $!\n";
 }
 
 #
@@ -226,11 +283,31 @@ exit (0);
 
 #### END OF MAIN FUNCTION ####
 
-# output a <url> element for an abstract page to the 'gz' (compressed file) or 'fh' (uncompressed file) member of $info
+my $_abstractxml_count = 0;
+
+# return a filename like 'sitemap-abstracts.xml.gz'
+sub next_abstractxml_filename
+{
+	my( %opts ) = @_;
+	my $fn = 'sitemap-abstracts';
+	if( $_abstractxml_count )
+	{
+		$fn .= $_abstractxml_count;
+	}
+	$fn .= '.xml';
+	if( $opts{gz} )
+	{
+		$fn .= '.gz';
+	}
+
+	$_abstractxml_count++;
+	return $fn;
+}
+
+# output a <url> element for an abstract page to the 'fh' member of $info
 sub output_abstract_url
 {
 	my ( $rep, $dataset, $eprint, $info ) = @_;
-
 
 	my $xml = sitemap_url(
 		loc => $eprint->get_url,
@@ -239,14 +316,7 @@ sub output_abstract_url
 		priority => 1.0,
 	);
 
-	if ( defined $info->{gz} )
-	{
-		$info->{gz}->gzwrite( $xml );
-	}
-	elsif ( defined $info->{fh} )
-	{
-		print { $info->{fh} } $xml;
-	}
+	&{$write}( $info->{fh}, $xml );
 	return;
 }
 
@@ -255,7 +325,7 @@ sub output_abstract_url
 # return the header of an XML file
 sub xml_header
 {
-	return '<?xml version="1.0" encoding="UTF-8"?>';
+	return qq/<?xml version="1.0" encoding="UTF-8"?>\n/;
 }
 
 # return the start tag for the <urlset> element

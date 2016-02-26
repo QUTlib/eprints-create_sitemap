@@ -26,6 +26,10 @@ repository\_id:
 `--man`
   Print the full manual page and then exit.
 
+`--nocompress`
+
+  Don't GZip compress the resulting file. For debuggery purposes.
+
 `--quiet`
   Be vewwy vewwy quiet. This option will supress all output
   unless an error occurs.
@@ -42,8 +46,8 @@ Copyright
 > 
 > This script is licensed under the same terms as [EPrints][1] itself.
 
-EPrints create_sitemap Script
-Copyright (C) 2014  QUT Library eServices
+EPrints create\_sitemap Script
+Copyright (C) 2016, QUT Library eServices
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
