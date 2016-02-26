@@ -27,7 +27,6 @@ repository\_id:
   Print the full manual page and then exit.
 
 `--nocompress`
-
   Don't GZip compress the resulting file. For debuggery purposes.
 
 `--quiet`
