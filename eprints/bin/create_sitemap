@@ -149,9 +149,7 @@ my $index_fn = 'sitemap.xml';
 
 my $static_path = $repository->get_conf( 'config_path' ) . '/static';
 
-my $host = $repository->get_conf( 'host' );
-my $port = $repository->get_conf( 'port' );
-my $baseurl = "http://$host" . ( $port != 80 ? ":$port" : '' );
+my $baseurl = $repository->get_conf( 'base_url' );
 
 # created once, in anticipation of future uses
 my $datestamp = sprintf( "%04d-%02d-%02d", EPrints::Time::get_date_array( time ) );
